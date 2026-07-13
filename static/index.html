@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>王者荣耀苹果微信省标监控</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>王者荣耀苹果微信省标</h1>
+          <p id="status">等待刷新</p>
+        </div>
+        <button id="refreshButton" type="button" title="立即刷新" aria-label="立即刷新">
+          <span aria-hidden="true">↻</span>
+        </button>
+      </header>
+
+      <section class="summary" aria-label="刷新概览">
+        <div>
+          <span>英雄数</span>
+          <strong id="heroCount">--</strong>
+        </div>
+        <div>
+          <span>成功</span>
+          <strong id="okCount">--</strong>
+        </div>
+        <div>
+          <span>失败</span>
+          <strong id="failedCount">--</strong>
+        </div>
+      </section>
+
+      <section class="table-wrap" aria-label="英雄省标列表">
+        <table>
+          <colgroup>
+            <col class="hero-col">
+            <col class="province-col">
+            <col class="power-col">
+            <col class="national-col">
+            <col class="updated-col">
+          </colgroup>
+          <thead>
+            <tr>
+              <th>英雄</th>
+              <th>省榜地区</th>
+              <th>省标第 100 分</th>
+              <th>国标</th>
+              <th>更新时间</th>
+            </tr>
+          </thead>
+          <tbody id="rankRows"></tbody>
+        </table>
+        <div id="emptyState" class="empty">正在获取苹果微信全英雄省标</div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
