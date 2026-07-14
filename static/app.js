@@ -17,10 +17,6 @@ function formatNumber(value) {
   return typeof value === "number" ? value.toLocaleString("zh-CN") : "--";
 }
 
-function formatUpdatedAt(value) {
-  return value || "--";
-}
-
 function sortRanks(items) {
   return [...items].sort((left, right) => {
     const leftPower = typeof left.provincePower === "number" ? left.provincePower : -1;
@@ -85,36 +81,18 @@ function render() {
     powerCell.className = "power-cell";
     powerCell.textContent = formatNumber(rank.provincePower);
 
-    const updatedCell = document.createElement("td");
-    updatedCell.className = "updated-cell";
-    updatedCell.textContent = rank.ok ? formatUpdatedAt(rank.updatedAt) : `失败：${rank.error || "获取失败"}`;
+    const macauCell = document.createElement("td");
+    macauCell.className = "power-cell";
+    macauCell.textContent = formatNumber(rank.macauPower);
+
     if (!rank.ok) {
-      updatedCell.title = rank.error || "获取失败";
+      powerCell.textContent = rank.error || "获取失败";
+      powerCell.title = rank.error || "获取失败";
     }
 
-    row.append(heroCell, provinceCell, powerCell, updatedCell);
+    row.append(heroCell, provinceCell, powerCell, macauCell);
     rowsEl.append(row);
   }
-}
-
-async function fetchRanksWithRetry(force = false) {
-  let lastError;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const refreshParam = force ? "&refresh=1" : "";
-      const response = await fetch(`/api/ranks?platform=${encodeURIComponent(PLATFORM)}${refreshParam}`, {
-        cache: "no-store",
-      });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      return response.json();
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1)));
-    }
-  }
-  throw lastError;
 }
 
 async function refreshRanks({ force = false } = {}) {
@@ -124,12 +102,67 @@ async function refreshRanks({ force = false } = {}) {
 
   refreshing = true;
   refreshButton.disabled = true;
-  statusEl.textContent = "正在抓取雅特家全英雄苹果微信省标...";
+  ranks = [];
+  latestRanks = new Map();
+  render();
+  statusEl.textContent = "正在抓取全英雄苹果微信省标...";
 
   try {
-    const data = await fetchRanksWithRetry(force);
-    mergeRanks(Array.isArray(data.ranks) ? data.ranks : []);
-    render();
+    const refreshParam = force ? "&refresh=1" : "";
+    const response = await fetch(`/api/ranks/stream?platform=${encodeURIComponent(PLATFORM)}${refreshParam}`, {
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    if (!response.body) {
+      throw new Error("当前浏览器不支持流式读取");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let total = 0;
+    let done = 0;
+
+    while (true) {
+      const { value, done: streamDone } = await reader.read();
+      if (streamDone) {
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (!line.trim()) {
+          continue;
+        }
+        const event = JSON.parse(line);
+        if (event.type === "meta") {
+          total = event.total || 0;
+          statusEl.textContent = total ? `已发现 ${total} 个英雄，正在抓取...` : "正在抓取...";
+          updateSummary();
+        } else if (event.type === "rank") {
+          done = event.done || done + 1;
+          total = event.total || total;
+          mergeRanks([event.rank]);
+          render();
+          statusEl.textContent = total ? `正在抓取 ${done}/${total}` : `正在抓取 ${done}`;
+        } else if (event.type === "error") {
+          throw new Error(event.error || "流式抓取失败");
+        }
+      }
+    }
+
+    if (buffer.trim()) {
+      const event = JSON.parse(buffer);
+      if (event.type === "rank") {
+        mergeRanks([event.rank]);
+        render();
+      }
+    }
 
     const refreshedAt = new Date().toLocaleTimeString("zh-CN", { hour12: false });
     statusEl.textContent = `已刷新 ${refreshedAt}`;

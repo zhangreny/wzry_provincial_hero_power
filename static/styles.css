@@ -104,7 +104,7 @@ button {
 
 table {
   width: 100%;
-  min-width: 760px;
+  min-width: 900px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -121,8 +121,8 @@ table {
   width: 140px;
 }
 
-.updated-col {
-  width: auto;
+.macau-col {
+  width: 150px;
 }
 
 th,
@@ -188,13 +188,6 @@ td {
   font-variant-numeric: tabular-nums;
 }
 
-.updated-cell {
-  overflow: hidden;
-  color: #526070;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .beijing {
   color: #b45309;
   font-weight: 700;
@@ -204,16 +197,8 @@ td {
   background: #fff7ed;
 }
 
-.failed-row .updated-cell {
-  color: #c2410c;
-}
-
 .pending-row td {
   background: #ffffff;
-}
-
-.pending-row .updated-cell {
-  color: #657186;
 }
 
 .empty {

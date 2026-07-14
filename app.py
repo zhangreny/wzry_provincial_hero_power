@@ -2,11 +2,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
-import html as html_lib
+import hashlib
 import json
-import re
 import socket
 import time
 
@@ -15,27 +14,33 @@ ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = ROOT / "static"
 PORT = 8765
 
-YATEJIA_ROOT = "https://wenda.yatejia.cn"
-YATEJIA_HERO_INDEX_URL = f"{YATEJIA_ROOT}/wangzherongyao/"
+YXSAOMA_ROOT = "https://yxsaoma.com"
+YXSAOMA_PAGE_URL = f"{YXSAOMA_ROOT}/czl"
+YXSAOMA_HEROES_URL = f"{YXSAOMA_ROOT}/api/app/pvp/heroes"
+YXSAOMA_SCORE_URL = f"{YXSAOMA_ROOT}/api/app/pvp/v2/area/score"
+YXSAOMA_SIGN_KEY = "warzoneSignKey20240515"
+APPLE_WECHAT_GAME_AREA_ID = 3
 DEFAULT_PLATFORM = "ios_wx"
 MAX_WORKERS = 24
 
 PLATFORM_LABELS = {
-    "qq": "安卓QQ",
-    "wx": "安卓微信",
-    "ios_qq": "苹果QQ",
-    "ios_wx": "苹果微信",
+    "qq": "\u5b89\u5353QQ",
+    "wx": "\u5b89\u5353\u5fae\u4fe1",
+    "ios_qq": "\u82f9\u679cQQ",
+    "ios_wx": "\u82f9\u679c\u5fae\u4fe1",
 }
 
-APPLE_WECHAT_SECTION = "苹果微信大区"
 
+def request(url, params=None, referer=YXSAOMA_PAGE_URL):
+    if params:
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}{urlencode(params)}"
 
-def request(url, encoding="utf-8", referer=YATEJIA_ROOT):
     req = Request(
         url,
         headers={
             "User-Agent": "Mozilla/5.0",
-            "Accept": "text/html,application/json,text/plain,*/*",
+            "Accept": "application/json,text/plain,*/*",
             "Referer": referer,
         },
     )
@@ -43,16 +48,22 @@ def request(url, encoding="utf-8", referer=YATEJIA_ROOT):
     for attempt in range(3):
         try:
             with urlopen(req, timeout=12) as response:
-                return response.read().decode(encoding, errors="replace")
+                return response.read().decode("utf-8", errors="replace")
         except HTTPError as exc:
             if 400 <= exc.code < 500:
                 raise exc
             last_error = exc
-            time.sleep(0.4 * (attempt + 1))
         except (URLError, TimeoutError, socket.timeout) as exc:
             last_error = exc
-            time.sleep(0.4 * (attempt + 1))
+        time.sleep(0.4 * (attempt + 1))
     raise last_error
+
+
+def request_json(url, params=None):
+    try:
+        return json.loads(request(url, params=params))
+    except json.JSONDecodeError as exc:
+        raise ValueError("yxsaoma returned invalid JSON") from exc
 
 
 def read_int(value):
@@ -61,127 +72,92 @@ def read_int(value):
     return int(str(value).replace(",", "").strip())
 
 
-def strip_tags(value):
-    text = re.sub(r"<[^>]+>", "", value or "")
-    return html_lib.unescape(text).strip()
+def yxsaoma_signed_params(params, timestamp=None):
+    signed = dict(params)
+    signed["timestamp"] = int(time.time() * 1000) if timestamp is None else timestamp
+    canonical = "&".join(f"{key}={signed[key]}" for key in sorted(signed)) + YXSAOMA_SIGN_KEY
+    signed["sign"] = hashlib.md5(canonical.encode("utf-8")).hexdigest()
+    return signed
 
 
-def first_match(pattern, text, default="", flags=re.S):
-    match = re.search(pattern, text, flags)
-    return html_lib.unescape(match.group(1)).strip() if match else default
-
-
-def fetch_apple_wechat_hero_urls():
-    html = request(YATEJIA_HERO_INDEX_URL)
-    seen = set()
-    heroes = []
-
-    for href in re.findall(r"<a\b[^>]*href=[\"']([^\"']*?/wangzherongyao/[^\"']+/?)", html, re.I):
-        url = urljoin(YATEJIA_HERO_INDEX_URL, html_lib.unescape(href))
-        parsed = urlparse(url)
-        if parsed.netloc != "wenda.yatejia.cn":
-            continue
-        slug = parsed.path.strip("/").split("/")[-1]
-        if not slug or slug == "wangzherongyao" or url in seen:
-            continue
-        seen.add(url)
-        heroes.append(
-            {
-                "ename": slug,
-                "cname": slug,
-                "title": "",
-                "iconUrl": "",
-                "url": url,
-            }
-        )
-
-    return heroes
+def yxsaoma_data(payload):
+    if payload.get("code") != "0000":
+        raise ValueError(payload.get("desc") or "yxsaoma request failed")
+    return payload.get("data")
 
 
 def fetch_hero_list():
-    return fetch_apple_wechat_hero_urls()
+    data = yxsaoma_data(request_json(YXSAOMA_HEROES_URL))
+    if not isinstance(data, list):
+        raise ValueError("yxsaoma hero list is invalid")
 
-
-def yatejia_platform_section(page_html):
-    start = page_html.find(APPLE_WECHAT_SECTION)
-    if start < 0:
-        raise ValueError("页面缺少苹果微信大区")
-
-    next_item = page_html.find('<div class="material-item"', start + len(APPLE_WECHAT_SECTION))
-    return page_html[start : next_item if next_item >= 0 else len(page_html)]
-
-
-def parse_province_rows(section_html):
-    province_start = section_html.find("<h3>省标战区</h3>")
-    if province_start < 0:
-        raise ValueError("页面缺少苹果微信省标战区")
-
-    province_html = section_html[province_start:]
-    data_section_start = province_html.find('<div class="data-section"')
-    if data_section_start >= 0:
-        province_html = province_html[:data_section_start]
-
-    rows = []
-    row_pattern = re.compile(
-        r"<span[^>]*class=['\"]fraction-prefix['\"][^>]*>\s*(\d+)\s*</span>\s*"
-        r"<span[^>]*class=['\"]area['\"][^>]*>(.*?)</span>\s*"
-        r"<span[^>]*class=['\"]fraction-value['\"][^>]*>\s*([0-9,]+)\s*分\s*</span>",
-        re.S,
-    )
-    for rank, area, value in row_pattern.findall(province_html):
-        rows.append(
+    heroes = []
+    for item in data:
+        hero_id = str(item.get("ename") or "")
+        if not hero_id:
+            continue
+        heroes.append(
             {
-                "rank": read_int(rank),
-                "area": strip_tags(area),
-                "power": read_int(value),
+                "ename": hero_id,
+                "cname": item.get("cname") or hero_id,
+                "title": item.get("title") or "",
+                "iconUrl": f"https://game.gtimg.cn/images/yxzj/img201606/heroimg/{hero_id}/{hero_id}.jpg",
+                "url": "",
             }
         )
-
-    if not rows:
-        raise ValueError("页面未解析到苹果微信省标分数")
-    return rows
+    return heroes
 
 
-def parse_national_power(section_html):
-    match = re.search(
-        r"苹果微信区国标上榜分数：.*?([0-9,]+)\s*（大国标）.*?([0-9,]+)\s*（小国标）",
-        strip_tags(section_html),
-        re.S,
-    )
-    if not match:
-        return None, None
-    return read_int(match.group(1)), read_int(match.group(2))
+def fetch_yxsaoma_score(hero_id, game_area_id):
+    params = yxsaoma_signed_params({"heroId": str(hero_id), "gameAreaId": game_area_id})
+    return request_json(YXSAOMA_SCORE_URL, params=params)
 
 
-def parse_yatejia_apple_wechat_rank(page_html, hero):
-    section = yatejia_platform_section(page_html)
-    province_rows = parse_province_rows(section)
-    national_power, small_national_power = parse_national_power(section)
-    top = province_rows[0]
+def is_macau(area):
+    normalized = (area or "").replace("\u7279\u522b\u884c\u653f\u533a", "")
+    return normalized in {"\u6fb3\u95e8", "\u4e2d\u56fd\u6fb3\u95e8"}
 
-    name = first_match(r'<div class="character-name">\s*(.*?)\s*</div>', page_html, hero.get("cname") or "--")
-    photo = first_match(r'<img\s+src="([^"]+)"\s+alt="[^"]*的头像"', page_html, hero.get("iconUrl") or "")
-    updated_at = first_match(r'<div id="update-time"[^>]*>\s*更新时间:\s*(.*?)\s*</div>', page_html, "")
-    if not updated_at:
-        updated_at = first_match(r'article:modified_time"\s+content="([^"]+)"', page_html, "")
+
+def parse_yxsaoma_apple_wechat_rank(payload, hero):
+    data = yxsaoma_data(payload)
+    rows = data.get("heroList") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("yxsaoma province list is invalid")
+
+    province_rows = []
+    for row in rows:
+        if row.get("level") != "province":
+            continue
+        power = read_int(row.get("rank"))
+        area = str(row.get("address") or "").strip()
+        if power is None or not area:
+            continue
+        province_rows.append({"area": area, "power": power})
+
+    if not province_rows:
+        raise ValueError("yxsaoma returned no province scores")
+
+    lowest = min(province_rows, key=lambda row: row["power"])
+    macau_rows = [row for row in province_rows if is_macau(row["area"])]
+    macau_power = min((row["power"] for row in macau_rows), default=None)
 
     return {
         "heroId": str(hero.get("ename") or ""),
-        "name": name,
+        "name": hero.get("cname") or "--",
         "alias": hero.get("title") or "",
-        "platform": "苹果微信大区",
-        "photo": photo,
-        "province": top["area"],
-        "provincePower": top["power"],
+        "platform": PLATFORM_LABELS[DEFAULT_PLATFORM],
+        "photo": hero.get("iconUrl") or "",
+        "province": lowest["area"],
+        "provincePower": lowest["power"],
+        "macauPower": macau_power,
         "city": "",
         "cityPower": None,
         "area": "",
         "areaPower": None,
-        "nationalPower": national_power,
-        "smallNationalPower": small_national_power,
-        "updatedAt": updated_at,
-        "source": "wenda.yatejia.cn",
-        "sourceUrl": hero.get("url") or "",
+        "nationalPower": None,
+        "smallNationalPower": None,
+        "source": "yxsaoma.com",
+        "sourceUrl": YXSAOMA_PAGE_URL,
         "provinceRanks": province_rows,
         "ok": True,
     }
@@ -189,11 +165,9 @@ def parse_yatejia_apple_wechat_rank(page_html, hero):
 
 def fetch_hero_rank(hero, platform=DEFAULT_PLATFORM):
     if normalize_platform(platform) != DEFAULT_PLATFORM:
-        raise ValueError("yatejia 当前只抓取苹果微信大区")
-    url = hero.get("url")
-    if not url:
-        raise ValueError("英雄缺少 yatejia URL")
-    return parse_yatejia_apple_wechat_rank(request(url, referer=YATEJIA_HERO_INDEX_URL), hero)
+        raise ValueError("only Apple WeChat is supported")
+    payload = fetch_yxsaoma_score(hero.get("ename"), APPLE_WECHAT_GAME_AREA_ID)
+    return parse_yxsaoma_apple_wechat_rank(payload, hero)
 
 
 def failed_rank(hero, platform, error):
@@ -205,15 +179,15 @@ def failed_rank(hero, platform, error):
         "photo": hero.get("iconUrl") or "",
         "province": "",
         "provincePower": None,
+        "macauPower": None,
         "city": "",
         "cityPower": None,
         "area": "",
         "areaPower": None,
         "nationalPower": None,
         "smallNationalPower": None,
-        "updatedAt": "",
-        "source": "wenda.yatejia.cn",
-        "sourceUrl": hero.get("url") or "",
+        "source": "yxsaoma.com",
+        "sourceUrl": YXSAOMA_PAGE_URL,
         "ok": False,
         "error": str(error),
     }
@@ -239,16 +213,43 @@ def fetch_all_hero_ranks(platform=DEFAULT_PLATFORM):
     return results
 
 
+def iter_rank_events(platform=DEFAULT_PLATFORM):
+    platform = normalize_platform(platform)
+    heroes = fetch_hero_list()
+    total = len(heroes)
+    done = 0
+
+    yield {
+        "type": "meta",
+        "platform": platform,
+        "platformLabel": PLATFORM_LABELS[platform],
+        "total": total,
+    }
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_map = {
+            executor.submit(fetch_hero_rank, hero, platform): hero
+            for hero in heroes
+        }
+        for future in as_completed(future_map):
+            hero = future_map[future]
+            done += 1
+            try:
+                rank = future.result()
+            except Exception as exc:
+                rank = failed_rank(hero, platform, exc)
+
+            yield {
+                "type": "rank",
+                "platform": platform,
+                "done": done,
+                "total": total,
+                "rank": rank,
+            }
+
+
 def normalize_platform(platform):
     return platform if platform in PLATFORM_LABELS else DEFAULT_PLATFORM
-
-
-def read_rank_cache(_platform):
-    return None
-
-
-def write_rank_cache(_platform, _ranks):
-    return None
 
 
 def ranks_payload(platform=DEFAULT_PLATFORM, force_refresh=False):
@@ -272,6 +273,19 @@ def json_response(handler, payload, status=200):
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def stream_json_lines(handler, events):
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.end_headers()
+
+    for event in events:
+        line = json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n"
+        handler.wfile.write(line)
+        handler.wfile.flush()
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -299,6 +313,19 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, ranks_payload(platform, force_refresh))
             except Exception as exc:
                 json_response(self, {"platform": platform, "ranks": [], "error": str(exc)}, 502)
+            return
+
+        if parsed.path == "/api/ranks/stream":
+            platform = query.get("platform", [DEFAULT_PLATFORM])[0]
+            try:
+                stream_json_lines(self, iter_rank_events(platform))
+            except Exception as exc:
+                try:
+                    line = json.dumps({"type": "error", "error": str(exc)}, ensure_ascii=False).encode("utf-8") + b"\n"
+                    self.wfile.write(line)
+                    self.wfile.flush()
+                except Exception:
+                    pass
             return
 
         if parsed.path == "/":
