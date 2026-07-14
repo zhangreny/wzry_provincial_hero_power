@@ -1,5 +1,4 @@
 const REFRESH_MS = 10 * 60 * 1000;
-const POLL_MS = 2000;
 const PLATFORM = "ios_wx";
 
 const rowsEl = document.querySelector("#rankRows");
@@ -13,7 +12,6 @@ const failedCountEl = document.querySelector("#failedCount");
 let ranks = [];
 let latestRanks = new Map();
 let refreshing = false;
-let pollTimer = null;
 
 function formatNumber(value) {
   return typeof value === "number" ? value.toLocaleString("zh-CN") : "--";
@@ -57,9 +55,6 @@ function render() {
     if (!rank.ok) {
       row.classList.add("failed-row");
     }
-    if (rank.pending) {
-      row.classList.add("pending-row");
-    }
 
     const heroCell = document.createElement("td");
     heroCell.className = "hero-cell";
@@ -90,22 +85,14 @@ function render() {
     powerCell.className = "power-cell";
     powerCell.textContent = formatNumber(rank.provincePower);
 
-    const nationalCell = document.createElement("td");
-    nationalCell.className = "value-cell";
-    nationalCell.textContent = formatNumber(rank.nationalPower);
-
     const updatedCell = document.createElement("td");
     updatedCell.className = "updated-cell";
-    if (rank.pending) {
-      updatedCell.textContent = "后台刷新中";
-    } else {
-      updatedCell.textContent = rank.ok ? formatUpdatedAt(rank.updatedAt) : `失败：${rank.error || "获取失败"}`;
-    }
+    updatedCell.textContent = rank.ok ? formatUpdatedAt(rank.updatedAt) : `失败：${rank.error || "获取失败"}`;
     if (!rank.ok) {
       updatedCell.title = rank.error || "获取失败";
     }
 
-    row.append(heroCell, provinceCell, powerCell, nationalCell, updatedCell);
+    row.append(heroCell, provinceCell, powerCell, updatedCell);
     rowsEl.append(row);
   }
 }
@@ -130,39 +117,22 @@ async function fetchRanksWithRetry(force = false) {
   throw lastError;
 }
 
-function scheduleRefreshPoll() {
-  if (pollTimer) {
-    return;
-  }
-  pollTimer = setTimeout(() => {
-    pollTimer = null;
-    refreshRanks({ polling: true });
-  }, POLL_MS);
-}
-
-async function refreshRanks({ force = false, polling = false } = {}) {
+async function refreshRanks({ force = false } = {}) {
   if (refreshing) {
     return;
   }
 
   refreshing = true;
   refreshButton.disabled = true;
-  statusEl.textContent = polling ? "正在读取后台刷新结果..." : "正在读取苹果微信全英雄省标...";
+  statusEl.textContent = "正在抓取雅特家全英雄苹果微信省标...";
 
   try {
     const data = await fetchRanksWithRetry(force);
     mergeRanks(Array.isArray(data.ranks) ? data.ranks : []);
     render();
 
-    if (data.refreshing) {
-      statusEl.textContent = data.cached ? "已显示缓存，后台刷新中..." : "已显示英雄列表，后台刷新中...";
-      scheduleRefreshPoll();
-    } else {
-      const refreshedAt = data.cachedAt
-        ? new Date(data.cachedAt * 1000).toLocaleTimeString("zh-CN", { hour12: false })
-        : new Date().toLocaleTimeString("zh-CN", { hour12: false });
-      statusEl.textContent = `已刷新 ${refreshedAt}`;
-    }
+    const refreshedAt = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    statusEl.textContent = `已刷新 ${refreshedAt}`;
   } catch (error) {
     statusEl.textContent = `刷新失败：${error.message}`;
     render();

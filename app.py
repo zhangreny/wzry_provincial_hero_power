@@ -2,26 +2,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote as url_quote, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 from urllib.request import Request, urlopen
+import html as html_lib
 import json
+import re
 import socket
-import threading
 import time
 
 
 ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = ROOT / "static"
 PORT = 8765
-CACHE_ROOT = ROOT / ".cache"
 
-HERO_LIST_URL = "https://www.sapi.run/hero/herolist.json"
-HERO_RANK_URL = "https://www.sapi.run/hero/select.php"
+YATEJIA_ROOT = "https://wenda.yatejia.cn"
+YATEJIA_HERO_INDEX_URL = f"{YATEJIA_ROOT}/wangzherongyao/"
 DEFAULT_PLATFORM = "ios_wx"
-MAX_WORKERS = 8
-CACHE_TTL_SECONDS = 10 * 60
-REFRESHING = {}
-REFRESH_LOCK = threading.Lock()
+MAX_WORKERS = 24
 
 PLATFORM_LABELS = {
     "qq": "安卓QQ",
@@ -30,22 +27,29 @@ PLATFORM_LABELS = {
     "ios_wx": "苹果微信",
 }
 
+APPLE_WECHAT_SECTION = "苹果微信大区"
 
-def request(url, encoding="utf-8", referer="https://www.sapi.run/"):
+
+def request(url, encoding="utf-8", referer=YATEJIA_ROOT):
     req = Request(
         url,
         headers={
             "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json,text/plain,*/*",
+            "Accept": "text/html,application/json,text/plain,*/*",
             "Referer": referer,
         },
     )
     last_error = None
     for attempt in range(3):
         try:
-            with urlopen(req, timeout=8) as response:
+            with urlopen(req, timeout=12) as response:
                 return response.read().decode(encoding, errors="replace")
-        except (HTTPError, URLError, TimeoutError, socket.timeout) as exc:
+        except HTTPError as exc:
+            if 400 <= exc.code < 500:
+                raise exc
+            last_error = exc
+            time.sleep(0.4 * (attempt + 1))
+        except (URLError, TimeoutError, socket.timeout) as exc:
             last_error = exc
             time.sleep(0.4 * (attempt + 1))
     raise last_error
@@ -54,66 +58,142 @@ def request(url, encoding="utf-8", referer="https://www.sapi.run/"):
 def read_int(value):
     if value in (None, "", "-"):
         return None
-    return int(value)
+    return int(str(value).replace(",", "").strip())
 
 
-def first_value(data, keys, default=""):
-    if not isinstance(data, dict):
-        return default
-    for key in keys:
-        value = data.get(key)
-        if value not in (None, ""):
-            return value
-    return default
+def strip_tags(value):
+    text = re.sub(r"<[^>]+>", "", value or "")
+    return html_lib.unescape(text).strip()
+
+
+def first_match(pattern, text, default="", flags=re.S):
+    match = re.search(pattern, text, flags)
+    return html_lib.unescape(match.group(1)).strip() if match else default
+
+
+def fetch_apple_wechat_hero_urls():
+    html = request(YATEJIA_HERO_INDEX_URL)
+    seen = set()
+    heroes = []
+
+    for href in re.findall(r"<a\b[^>]*href=[\"']([^\"']*?/wangzherongyao/[^\"']+/?)", html, re.I):
+        url = urljoin(YATEJIA_HERO_INDEX_URL, html_lib.unescape(href))
+        parsed = urlparse(url)
+        if parsed.netloc != "wenda.yatejia.cn":
+            continue
+        slug = parsed.path.strip("/").split("/")[-1]
+        if not slug or slug == "wangzherongyao" or url in seen:
+            continue
+        seen.add(url)
+        heroes.append(
+            {
+                "ename": slug,
+                "cname": slug,
+                "title": "",
+                "iconUrl": "",
+                "url": url,
+            }
+        )
+
+    return heroes
 
 
 def fetch_hero_list():
-    payload = json.loads(request(HERO_LIST_URL))
-    if payload.get("code") != 200 or not isinstance(payload.get("data"), list):
-        raise ValueError("英雄列表接口返回异常")
+    return fetch_apple_wechat_hero_urls()
 
-    heroes = []
-    for item in payload["data"]:
-        hero_id = str(item.get("ename") or "").strip()
-        name = str(item.get("cname") or "").strip()
-        if hero_id and name:
-            heroes.append(
-                {
-                    "ename": hero_id,
-                    "cname": name,
-                    "title": item.get("title") or "",
-                    "iconUrl": item.get("iconUrl") or "",
-                }
-            )
 
-    return sorted(heroes, key=lambda hero: int(hero["ename"]) if hero["ename"].isdigit() else hero["ename"])
+def yatejia_platform_section(page_html):
+    start = page_html.find(APPLE_WECHAT_SECTION)
+    if start < 0:
+        raise ValueError("页面缺少苹果微信大区")
+
+    next_item = page_html.find('<div class="material-item"', start + len(APPLE_WECHAT_SECTION))
+    return page_html[start : next_item if next_item >= 0 else len(page_html)]
+
+
+def parse_province_rows(section_html):
+    province_start = section_html.find("<h3>省标战区</h3>")
+    if province_start < 0:
+        raise ValueError("页面缺少苹果微信省标战区")
+
+    province_html = section_html[province_start:]
+    data_section_start = province_html.find('<div class="data-section"')
+    if data_section_start >= 0:
+        province_html = province_html[:data_section_start]
+
+    rows = []
+    row_pattern = re.compile(
+        r"<span[^>]*class=['\"]fraction-prefix['\"][^>]*>\s*(\d+)\s*</span>\s*"
+        r"<span[^>]*class=['\"]area['\"][^>]*>(.*?)</span>\s*"
+        r"<span[^>]*class=['\"]fraction-value['\"][^>]*>\s*([0-9,]+)\s*分\s*</span>",
+        re.S,
+    )
+    for rank, area, value in row_pattern.findall(province_html):
+        rows.append(
+            {
+                "rank": read_int(rank),
+                "area": strip_tags(area),
+                "power": read_int(value),
+            }
+        )
+
+    if not rows:
+        raise ValueError("页面未解析到苹果微信省标分数")
+    return rows
+
+
+def parse_national_power(section_html):
+    match = re.search(
+        r"苹果微信区国标上榜分数：.*?([0-9,]+)\s*（大国标）.*?([0-9,]+)\s*（小国标）",
+        strip_tags(section_html),
+        re.S,
+    )
+    if not match:
+        return None, None
+    return read_int(match.group(1)), read_int(match.group(2))
+
+
+def parse_yatejia_apple_wechat_rank(page_html, hero):
+    section = yatejia_platform_section(page_html)
+    province_rows = parse_province_rows(section)
+    national_power, small_national_power = parse_national_power(section)
+    top = province_rows[0]
+
+    name = first_match(r'<div class="character-name">\s*(.*?)\s*</div>', page_html, hero.get("cname") or "--")
+    photo = first_match(r'<img\s+src="([^"]+)"\s+alt="[^"]*的头像"', page_html, hero.get("iconUrl") or "")
+    updated_at = first_match(r'<div id="update-time"[^>]*>\s*更新时间:\s*(.*?)\s*</div>', page_html, "")
+    if not updated_at:
+        updated_at = first_match(r'article:modified_time"\s+content="([^"]+)"', page_html, "")
+
+    return {
+        "heroId": str(hero.get("ename") or ""),
+        "name": name,
+        "alias": hero.get("title") or "",
+        "platform": "苹果微信大区",
+        "photo": photo,
+        "province": top["area"],
+        "provincePower": top["power"],
+        "city": "",
+        "cityPower": None,
+        "area": "",
+        "areaPower": None,
+        "nationalPower": national_power,
+        "smallNationalPower": small_national_power,
+        "updatedAt": updated_at,
+        "source": "wenda.yatejia.cn",
+        "sourceUrl": hero.get("url") or "",
+        "provinceRanks": province_rows,
+        "ok": True,
+    }
 
 
 def fetch_hero_rank(hero, platform=DEFAULT_PLATFORM):
-    platform = platform if platform in PLATFORM_LABELS else DEFAULT_PLATFORM
-    url = f"{HERO_RANK_URL}?hero={url_quote(hero['cname'])}&type={url_quote(platform)}"
-    payload = json.loads(request(url))
-    if payload.get("code") != 200 or not isinstance(payload.get("data"), dict):
-        raise ValueError(payload.get("msg") or f"接口返回 code={payload.get('code')}")
-
-    data = payload["data"]
-    return {
-        "heroId": str(first_value(data, ("uid", "id", "heroId", "ename"), hero.get("ename") or "")),
-        "name": first_value(data, ("name", "cname"), hero.get("cname") or "--"),
-        "alias": first_value(data, ("alias", "title"), hero.get("title") or ""),
-        "platform": first_value(data, ("platform", "type"), PLATFORM_LABELS[platform]),
-        "photo": first_value(data, ("photo", "iconUrl", "icon"), hero.get("iconUrl") or ""),
-        "province": first_value(data, ("province",), ""),
-        "provincePower": read_int(first_value(data, ("provincePower",), None)),
-        "city": first_value(data, ("city",), ""),
-        "cityPower": read_int(first_value(data, ("cityPower",), None)),
-        "area": first_value(data, ("area",), ""),
-        "areaPower": read_int(first_value(data, ("areaPower",), None)),
-        "nationalPower": read_int(first_value(data, ("guobiao", "nationalPower"), None)),
-        "updatedAt": first_value(data, ("updatetime", "updatedAt", "time"), ""),
-        "source": "sapi.run",
-        "ok": True,
-    }
+    if normalize_platform(platform) != DEFAULT_PLATFORM:
+        raise ValueError("yatejia 当前只抓取苹果微信大区")
+    url = hero.get("url")
+    if not url:
+        raise ValueError("英雄缺少 yatejia URL")
+    return parse_yatejia_apple_wechat_rank(request(url, referer=YATEJIA_HERO_INDEX_URL), hero)
 
 
 def failed_rank(hero, platform, error):
@@ -130,36 +210,17 @@ def failed_rank(hero, platform, error):
         "area": "",
         "areaPower": None,
         "nationalPower": None,
+        "smallNationalPower": None,
         "updatedAt": "",
-        "source": "sapi.run",
+        "source": "wenda.yatejia.cn",
+        "sourceUrl": hero.get("url") or "",
         "ok": False,
         "error": str(error),
     }
 
 
-def pending_rank(hero, platform):
-    return {
-        "heroId": str(hero.get("ename") or ""),
-        "name": hero.get("cname") or "--",
-        "alias": hero.get("title") or "",
-        "platform": PLATFORM_LABELS.get(platform, PLATFORM_LABELS[DEFAULT_PLATFORM]),
-        "photo": hero.get("iconUrl") or "",
-        "province": "",
-        "provincePower": None,
-        "city": "",
-        "cityPower": None,
-        "area": "",
-        "areaPower": None,
-        "nationalPower": None,
-        "updatedAt": "",
-        "source": "sapi.run",
-        "ok": False,
-        "pending": True,
-    }
-
-
 def fetch_all_hero_ranks(platform=DEFAULT_PLATFORM):
-    platform = platform if platform in PLATFORM_LABELS else DEFAULT_PLATFORM
+    platform = normalize_platform(platform)
     heroes = fetch_hero_list()
     results = [None] * len(heroes)
 
@@ -182,91 +243,24 @@ def normalize_platform(platform):
     return platform if platform in PLATFORM_LABELS else DEFAULT_PLATFORM
 
 
-def rank_cache_path(platform):
-    return CACHE_ROOT / f"ranks-{normalize_platform(platform)}.json"
+def read_rank_cache(_platform):
+    return None
 
 
-def read_rank_cache(platform):
-    path = rank_cache_path(platform)
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload.get("ranks"), list):
-        return None
-    return payload
-
-
-def write_rank_cache(platform, ranks):
-    platform = normalize_platform(platform)
-    CACHE_ROOT.mkdir(exist_ok=True)
-    payload = {
-        "platform": platform,
-        "platformLabel": PLATFORM_LABELS[platform],
-        "cachedAt": time.time(),
-        "ranks": ranks,
-    }
-    path = rank_cache_path(platform)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    temporary.replace(path)
-    return payload
-
-
-def refresh_rank_cache(platform):
-    platform = normalize_platform(platform)
-    try:
-        write_rank_cache(platform, fetch_all_hero_ranks(platform))
-    finally:
-        with REFRESH_LOCK:
-            REFRESHING[platform] = False
-
-
-def start_background_refresh(platform):
-    platform = normalize_platform(platform)
-    with REFRESH_LOCK:
-        if REFRESHING.get(platform):
-            return True
-        REFRESHING[platform] = True
-
-    thread = threading.Thread(target=refresh_rank_cache, args=(platform,), daemon=True)
-    thread.start()
-    return True
-
-
-def is_cache_stale(cache):
-    cached_at = cache.get("cachedAt") if isinstance(cache, dict) else None
-    return not isinstance(cached_at, (int, float)) or time.time() - cached_at >= CACHE_TTL_SECONDS
+def write_rank_cache(_platform, _ranks):
+    return None
 
 
 def ranks_payload(platform=DEFAULT_PLATFORM, force_refresh=False):
     platform = normalize_platform(platform)
-    cache = read_rank_cache(platform)
-    refreshing = False
-
-    if force_refresh or cache is None or is_cache_stale(cache):
-        refreshing = start_background_refresh(platform)
-
-    if cache:
-        return {
-            "platform": platform,
-            "platformLabel": PLATFORM_LABELS[platform],
-            "cached": True,
-            "cachedAt": cache.get("cachedAt"),
-            "refreshing": refreshing or REFRESHING.get(platform, False),
-            "ranks": cache["ranks"],
-        }
-
-    heroes = fetch_hero_list()
+    ranks = fetch_all_hero_ranks(platform)
     return {
         "platform": platform,
         "platformLabel": PLATFORM_LABELS[platform],
         "cached": False,
         "cachedAt": None,
-        "refreshing": refreshing or REFRESHING.get(platform, False),
-        "ranks": [pending_rank(hero, platform) for hero in heroes],
+        "refreshing": False,
+        "ranks": ranks,
     }
 
 
@@ -313,5 +307,5 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"http://127.0.0.1:{PORT}")
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    print(f"http://0.0.0.0:{PORT}")
+    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
