@@ -104,25 +104,19 @@ button {
 
 table {
   width: 100%;
-  min-width: 900px;
+  min-width: 560px;
   border-collapse: collapse;
   table-layout: fixed;
 }
 
 .hero-col {
-  width: 310px;
+  width: 200px;
 }
 
-.province-col {
-  width: 140px;
-}
-
-.power-col {
-  width: 140px;
-}
-
+.province-col,
+.power-col,
 .macau-col {
-  width: 150px;
+  width: 120px;
 }
 
 th,
@@ -155,14 +149,6 @@ td {
   align-items: center;
   gap: 12px;
   min-width: 0;
-}
-
-.hero-cell img {
-  width: 42px;
-  height: 42px;
-  flex: 0 0 auto;
-  border-radius: 6px;
-  object-fit: cover;
 }
 
 .hero-cell div {

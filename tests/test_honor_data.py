@@ -1,10 +1,42 @@
 import unittest
 from unittest.mock import patch
+from pathlib import Path
 
 import app
 
 
 class HonorDataTests(unittest.TestCase):
+    def test_score_requests_are_serialized(self):
+        self.assertEqual(app.MAX_WORKERS, 4)
+
+    def test_automatic_sign_timestamps_are_unique(self):
+        with patch.object(app.time, "time", return_value=1700000000):
+            with patch.object(app, "LAST_SIGN_TIMESTAMP", 0, create=True):
+                first = app.yxsaoma_signed_params({"heroId": "151", "gameAreaId": 3})
+                second = app.yxsaoma_signed_params({"heroId": "167", "gameAreaId": 3})
+
+        self.assertEqual(first["timestamp"], 1700000000000)
+        self.assertEqual(second["timestamp"], 1700000000001)
+
+    def test_monitor_has_no_daily_cache_or_automatic_refresh(self):
+        frontend = (Path(app.STATIC_ROOT) / "app.js").read_text(encoding="utf-8")
+
+        self.assertFalse(hasattr(app, "DAILY_CACHE_PATH"))
+        self.assertNotIn("setInterval(", frontend)
+
+    def test_frontend_does_not_render_hero_portraits(self):
+        source = (Path(app.STATIC_ROOT) / "app.js").read_text(encoding="utf-8")
+
+        self.assertNotIn('document.createElement("img")', source)
+        self.assertNotIn("rank.photo", source)
+
+    def test_table_columns_use_requested_minimum_widths(self):
+        source = (Path(app.STATIC_ROOT) / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn("min-width: 560px", source)
+        self.assertIn(".hero-col {\n  width: 200px", source)
+        self.assertIn(".province-col,\n.power-col,\n.macau-col {\n  width: 120px", source)
+
     def test_signs_yxsaoma_score_request_like_the_frontend(self):
         params = app.yxsaoma_signed_params({"heroId": "151", "gameAreaId": 3}, timestamp=1700000000000)
 

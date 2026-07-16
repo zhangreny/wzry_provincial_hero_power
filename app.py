@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Lock
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -13,6 +14,8 @@ import time
 ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = ROOT / "static"
 PORT = 8765
+SIGN_TIMESTAMP_LOCK = Lock()
+LAST_SIGN_TIMESTAMP = 0
 
 YXSAOMA_ROOT = "https://yxsaoma.com"
 YXSAOMA_PAGE_URL = f"{YXSAOMA_ROOT}/czl"
@@ -21,7 +24,7 @@ YXSAOMA_SCORE_URL = f"{YXSAOMA_ROOT}/api/app/pvp/v2/area/score"
 YXSAOMA_SIGN_KEY = "warzoneSignKey20240515"
 APPLE_WECHAT_GAME_AREA_ID = 3
 DEFAULT_PLATFORM = "ios_wx"
-MAX_WORKERS = 24
+MAX_WORKERS = 4
 
 PLATFORM_LABELS = {
     "qq": "\u5b89\u5353QQ",
@@ -74,7 +77,12 @@ def read_int(value):
 
 def yxsaoma_signed_params(params, timestamp=None):
     signed = dict(params)
-    signed["timestamp"] = int(time.time() * 1000) if timestamp is None else timestamp
+    if timestamp is None:
+        global LAST_SIGN_TIMESTAMP
+        with SIGN_TIMESTAMP_LOCK:
+            timestamp = max(int(time.time() * 1000), LAST_SIGN_TIMESTAMP + 1)
+            LAST_SIGN_TIMESTAMP = timestamp
+    signed["timestamp"] = timestamp
     canonical = "&".join(f"{key}={signed[key]}" for key in sorted(signed)) + YXSAOMA_SIGN_KEY
     signed["sign"] = hashlib.md5(canonical.encode("utf-8")).hexdigest()
     return signed
@@ -194,23 +202,7 @@ def failed_rank(hero, platform, error):
 
 
 def fetch_all_hero_ranks(platform=DEFAULT_PLATFORM):
-    platform = normalize_platform(platform)
-    heroes = fetch_hero_list()
-    results = [None] * len(heroes)
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_map = {
-            executor.submit(fetch_hero_rank, hero, platform): (index, hero)
-            for index, hero in enumerate(heroes)
-        }
-        for future in as_completed(future_map):
-            index, hero = future_map[future]
-            try:
-                results[index] = future.result()
-            except Exception as exc:
-                results[index] = failed_rank(hero, platform, exc)
-
-    return results
+    return [event["rank"] for event in iter_rank_events(platform) if event["type"] == "rank"]
 
 
 def iter_rank_events(platform=DEFAULT_PLATFORM):

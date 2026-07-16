@@ -1,4 +1,3 @@
-const REFRESH_MS = 10 * 60 * 1000;
 const PLATFORM = "ios_wx";
 
 const rowsEl = document.querySelector("#rankRows");
@@ -54,14 +53,6 @@ function render() {
 
     const heroCell = document.createElement("td");
     heroCell.className = "hero-cell";
-
-    if (rank.photo) {
-      const image = document.createElement("img");
-      image.src = rank.photo;
-      image.alt = "";
-      image.loading = "lazy";
-      heroCell.append(image);
-    }
 
     const heroText = document.createElement("div");
     const heroName = document.createElement("strong");
@@ -179,4 +170,3 @@ refreshButton.addEventListener("click", () => refreshRanks({ force: true }));
 
 render();
 refreshRanks();
-setInterval(() => refreshRanks({ force: true }), REFRESH_MS);
